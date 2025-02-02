@@ -1,0 +1,8 @@
+[theme]
+base="dark"  # Set to dark mode
+primaryColor="#1abc9c"  # Adjusted to a softer, more visually appealing shade of green
+backgroundColor="#1e272e"  # A dark gray for a pleasant dark-mode background
+secondaryBackgroundColor="#2f3640"  # Slightly lighter gray for secondary areas
+textColor="#dcdde1"  # Light gray for readable text against a dark background
+font="sans serif"  # Keep as sans serif for simplicity
+
