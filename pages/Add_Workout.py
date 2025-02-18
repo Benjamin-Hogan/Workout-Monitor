@@ -9,11 +9,17 @@ def main():
     # Fetch existing exercises from DB
     conn = create_connection()
     c = conn.cursor()
-    c.execute("SELECT id, name FROM exercises ORDER BY name ASC")
-    all_exercises = c.fetchall()  # list of tuples (id, name)
+    c.execute(
+        "SELECT id, name, muscle_type, workout_type FROM exercises ORDER BY name ASC"
+    )
+    all_exercises = c.fetchall()  # list of tuples (id, name, muscle_type, workout_type)
     conn.close()
 
-    exercise_names = [row[1] for row in all_exercises]
+    exercise_dict = {
+        row[1]: {"id": row[0], "muscle_type": row[2], "workout_type": row[3]}
+        for row in all_exercises
+    }
+    exercise_names = list(exercise_dict.keys())
 
     # Create two tabs
     tab_log, tab_manage = st.tabs(["Log Workout", "Manage Workout Types"])
@@ -22,20 +28,18 @@ def main():
     with tab_log:
         st.subheader("Log a Workout Entry")
 
-        # If we have existing presets, show them in a selectbox
-        if exercise_names:
-            selected_workout = st.selectbox(
-                "Select a Preset Workout", exercise_names)
+        # Select preset workout (inherits muscle_type and workout_type)
+        selected_workout = (
+            st.selectbox("Select a Preset Workout",
+                         exercise_names) if exercise_names else None
+        )
+
+        if selected_workout:
+            # Retrieve attributes from selected workout
+            muscle_type = exercise_dict[selected_workout]["muscle_type"]
+            workout_type = exercise_dict[selected_workout]["workout_type"]
         else:
-            st.info("No presets yet. Add one in the 'Manage Workout Types' tab!")
-            selected_workout = None
-
-        # Also allow a custom name input if user wants a one-off
-        custom_workout = st.text_input(
-            "Or type a custom workout name (optional)")
-
-        # Determine final workout name
-        final_workout = custom_workout.strip() if custom_workout.strip() else selected_workout
+            muscle_type, workout_type = None, None
 
         # Other workout details
         weight = st.number_input(
@@ -46,46 +50,61 @@ def main():
         workout_date = st.date_input("Date", datetime.date.today())
 
         if st.button("Add Workout Record"):
-            if final_workout:
+            if selected_workout:
                 conn = create_connection()
                 c = conn.cursor()
-                c.execute("""
-                    INSERT INTO workouts (workout, weight, sets, reps, date)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (final_workout, weight, sets, reps, str(workout_date)))
+                c.execute(
+                    """
+                    INSERT INTO workouts (workout, weight, sets, reps, date, muscle_type, workout_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (selected_workout, weight, sets, reps, str(
+                        workout_date), muscle_type, workout_type),
+                )
                 conn.commit()
                 conn.close()
                 st.success(
-                    f"Workout added: {final_workout} on {workout_date}.")
+                    f"Workout added: {selected_workout} on {workout_date}.")
             else:
-                st.warning(
-                    "Please select or enter a workout name before adding.")
+                st.warning("Please select a workout preset before adding.")
 
     # ---------------------- TAB 2: Manage Workout Types -----------------------
     with tab_manage:
         st.subheader("Add New Preset, Rename, or Delete")
 
-        # 1) Add a new workout type
+        # 1) Add a new workout type with Muscle Type and Workout Type
         st.write("### Add a New Workout Type")
-        new_exercise = st.text_input(
-            "e.g., 'Barbell Rows', 'Sprints', 'Leg Press'", key="new_exercise")
+        new_exercise = st.text_input("Workout Name", key="new_exercise")
+        new_muscle_type = st.selectbox(
+            "Muscle Type", ["Chest", "Back", "Legs",
+                            "Arms", "Shoulders", "Core", "Full Body"]
+        )
+        new_workout_type = st.selectbox(
+            "Workout Type", ["Push", "Pull", "Leg", "Full-Body", "Core"]
+        )
 
         if st.button("Add New Workout Type"):
             if new_exercise.strip():
                 conn = create_connection()
                 c = conn.cursor()
                 try:
-                    c.execute("INSERT INTO exercises (name) VALUES (?)",
-                              (new_exercise.strip(),))
+                    c.execute(
+                        """
+                        INSERT INTO exercises (name, muscle_type, workout_type) 
+                        VALUES (?, ?, ?)
+                        """,
+                        (new_exercise.strip(), new_muscle_type, new_workout_type),
+                    )
                     conn.commit()
                     st.success(
-                        f"'{new_exercise.strip()}' has been added to your presets!")
+                        f"'{new_exercise.strip()}' added with {new_muscle_type} - {new_workout_type}."
+                    )
                 except Exception as e:
                     st.error(
                         f"Could not add '{new_exercise.strip()}'. Error: {e}")
                 conn.close()
             else:
-                st.warning("Please enter a valid name before adding.")
+                st.warning("Please enter a valid workout name before adding.")
 
         st.write("---")
 
@@ -93,11 +112,20 @@ def main():
         st.write("### Edit or Delete a Preset")
         if exercise_names:
             selected_for_edit = st.selectbox(
-                "Select a Preset to Manage", exercise_names, key="edit_select")
+                "Select a Preset to Manage", exercise_names, key="edit_select"
+            )
             action = st.radio(
-                "Action", ["Rename", "Delete"], key="edit_action")
+                "Action", ["Rename", "Delete", "Change Attributes"], key="edit_action")
             new_name_input = st.text_input(
                 "New name (if renaming)", key="rename_input")
+            updated_muscle_type = st.selectbox(
+                "New Muscle Type", ["Chest", "Back", "Legs",
+                                    "Arms", "Shoulders", "Core", "Full Body"]
+            )
+            updated_workout_type = st.selectbox(
+                "New Workout Type", ["Push", "Pull",
+                                     "Leg", "Full-Body", "Core"]
+            )
 
             if st.button("Apply Changes", key="apply_changes"):
                 conn = create_connection()
@@ -105,18 +133,44 @@ def main():
                 if action == "Delete":
                     c.execute("DELETE FROM exercises WHERE name = ?",
                               (selected_for_edit,))
-                    st.warning(f"Deleted '{selected_for_edit}' from presets!")
+                    c.execute("DELETE FROM workouts WHERE workout = ?",
+                              (selected_for_edit,))
+                    st.warning(
+                        f"Deleted '{selected_for_edit}' from presets and all associated workouts!")
                 elif action == "Rename":
                     if not new_name_input.strip():
                         st.error("Please enter a new name to rename.")
                     else:
-                        try:
-                            c.execute("UPDATE exercises SET name=? WHERE name=?",
-                                      (new_name_input.strip(), selected_for_edit))
-                            st.success(
-                                f"Renamed '{selected_for_edit}' to '{new_name_input.strip()}'!")
-                        except Exception as e:
-                            st.error(f"Could not rename. Error: {e}")
+                        c.execute("UPDATE exercises SET name=? WHERE name=?",
+                                  (new_name_input.strip(), selected_for_edit))
+                        c.execute("UPDATE workouts SET workout=? WHERE workout=?",
+                                  (new_name_input.strip(), selected_for_edit))
+                        st.success(
+                            f"Renamed '{selected_for_edit}' to '{new_name_input.strip()}'.")
+                elif action == "Change Attributes":
+                    # Update exercises table
+                    c.execute(
+                        """
+                        UPDATE exercises 
+                        SET muscle_type=?, workout_type=? 
+                        WHERE name=?
+                        """,
+                        (updated_muscle_type, updated_workout_type, selected_for_edit),
+                    )
+
+                    # Cascade update in workouts table
+                    c.execute(
+                        """
+                        UPDATE workouts 
+                        SET muscle_type=?, workout_type=? 
+                        WHERE workout=?
+                        """,
+                        (updated_muscle_type, updated_workout_type, selected_for_edit),
+                    )
+
+                    st.success(
+                        f"Updated '{selected_for_edit}' to {updated_muscle_type} - {updated_workout_type} in both workouts and presets."
+                    )
                 conn.commit()
                 conn.close()
         else:

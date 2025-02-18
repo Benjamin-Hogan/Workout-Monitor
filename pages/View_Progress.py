@@ -1,82 +1,58 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import numpy as np
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
-from sklearn.ensemble import IsolationForest
-from scipy.optimize import curve_fit
-from prophet import Prophet
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from io import BytesIO
 import base64
-from db_utils import create_connection
-import datetime
-import os  # Added import for handling file modification time
+import os
+from scipy.optimize import curve_fit
+from prophet import Prophet
+from statsmodels.tsa.seasonal import seasonal_decompose
+from db_utils import create_connection  # adjust if needed
 
-# Enable wide mode for better layout
-st.set_page_config(layout="wide")
+# =======================
+# PAGE CONFIGURATION & CUSTOM CSS
+# =======================
+st.set_page_config(layout="wide", page_title="Workout Progress Dashboard")
+st.markdown(
+    """
+    <style>
+    .reportview-container .main .block-container {
+        max-width: 1200px;
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    .sidebar .sidebar-content {
+        background: linear-gradient(#2e7bcf, #2e7bcf);
+        color: white;
+    }
+    .css-1d391kg {  
+        font-size: 2rem;
+        font-weight: 700;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-
-def main():
-    st.header("📊 View Progress Dashboard - Enhanced Analytics")
-
-    # Initialize tabs
-    tabs = st.tabs([
-        "📋 Summary Statistics",
-        "📈 Visualizations",
-        "🏅 Personal Bests",
-        "🔬 Advanced Analytics & Modeling",
-        "📥 Download Reports"
-    ])
-
-    # Load data
-    df_workouts = load_workouts()
-
-    if df_workouts.empty:
-        st.warning("⚠️ No workouts logged yet. Please add or upload data.")
-        return
-
-    # Calculate Volume
-    df_workouts["volume"] = df_workouts["weight"] * \
-        df_workouts["reps"] * df_workouts["sets"]
-
-    # Add multiple 1RM formulas for later use
-    df_workouts["Epley_1RM"] = df_workouts.apply(
-        lambda row: epley_1rm(row["weight"], row["reps"]), axis=1
-    )
-    df_workouts["Brzycki_1RM"] = df_workouts.apply(
-        lambda row: brzycki_1rm(row["weight"], row["reps"]), axis=1
-    )
-    df_workouts["Lombardi_1RM"] = df_workouts.apply(
-        lambda row: lombardi_1rm(row["weight"], row["reps"]), axis=1
-    )
-
-    # Tab 1: Summary Statistics
-    with tabs[0]:
-        summary_statistics(df_workouts)
-
-    # Tab 2: Visualizations
-    with tabs[1]:
-        visualizations(df_workouts)
-
-    # Tab 3: Personal Bests
-    with tabs[2]:
-        personal_bests(df_workouts)
-
-    # Tab 4: Advanced Analytics & Modeling
-    with tabs[3]:
-        advanced_analytics(df_workouts)
-
-    # Tab 5: Download Reports
-    with tabs[4]:
-        download_reports(df_workouts)
+# =======================
+# DATA LOADING & PREPROCESSING
+# =======================
 
 
+@st.cache_data
 def load_workouts():
     """Load workouts data from the database."""
+    try:
+        db_path = "workouts.db"
+        last_update = os.path.getmtime(db_path)
+    except Exception as e:
+        st.error(f"❌ Unable to access the database file: {e}")
+        last_update = None
+
     @st.cache_data
     def get_workouts(last_update):
         with create_connection() as conn:
@@ -85,639 +61,544 @@ def load_workouts():
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
 
-    db_path = "workouts.db"  # Update this path if your database is located elsewhere
-    try:
-        last_update = os.path.getmtime(db_path)
-    except Exception as e:
-        st.error(f"❌ Unable to access the database file: {e}")
-        last_update = None
-
     if last_update is not None:
         return get_workouts(last_update)
     else:
-        return pd.DataFrame()  # Return empty DataFrame if database access fails
+        return pd.DataFrame()
+
+# --- 1RM FORMULAS ---
 
 
-# ------------------------------------------------
-# 1RM Formulas
-# ------------------------------------------------
 def epley_1rm(weight, reps):
-    """Epley formula: 1RM = weight * (1 + reps/30)."""
-    if reps > 0:
-        return weight * (1 + (reps / 30))
-    return None
+    return weight * (1 + reps / 30) if reps > 0 else None
 
 
 def brzycki_1rm(weight, reps):
-    """Brzycki formula: 1RM = weight * (36 / (37 - reps)), valid for reps <= ~10-12."""
-    if 0 < reps < 37:  # to avoid division by zero or negative
-        return weight * (36 / (37 - reps))
-    return None
+    return weight * (36 / (37 - reps)) if 0 < reps < 37 else None
 
 
 def lombardi_1rm(weight, reps):
-    """Lombardi formula: 1RM = weight * (reps ^ 0.10)."""
-    if reps > 0:
-        return weight * (reps ** 0.10)
-    return None
+    return weight * (reps ** 0.10) if reps > 0 else None
+
+# =======================
+# GLOBAL FILTERING (Sidebar)
+# =======================
 
 
-# ------------------------------------------------
-# Summary Statistics
-# ------------------------------------------------
+def filter_data(df):
+    st.sidebar.header("🔧 Global Filter Options")
+    min_date = st.sidebar.date_input("Start Date", value=df["date"].min())
+    max_date = st.sidebar.date_input("End Date", value=df["date"].max())
+
+    all_workouts = sorted(df["workout"].unique().tolist())
+    if st.sidebar.checkbox("Filter by specific workouts?", value=False, key="custom_workouts"):
+        selected_workouts = st.sidebar.multiselect(
+            "Select Workouts", options=all_workouts, default=[],
+            help="Select one or more workouts (leave empty to include all)."
+        )
+        if not selected_workouts:
+            selected_workouts = all_workouts
+    else:
+        selected_workouts = all_workouts
+
+    if "workout_type" in df.columns:
+        all_types = sorted(df["workout_type"].dropna().unique().tolist())
+        selected_types = st.sidebar.multiselect(
+            "Select Workout Types", options=all_types, default=all_types)
+    else:
+        selected_types = []
+
+    if "muscle_type" in df.columns:
+        all_muscles = sorted(df["muscle_type"].dropna().unique().tolist())
+        selected_muscles = st.sidebar.multiselect(
+            "Select Muscle Types", options=all_muscles, default=all_muscles)
+    else:
+        selected_muscles = []
+
+    filter_logic = st.sidebar.radio(
+        "Combine Workout Filters with:", options=["AND", "OR"], index=0)
+    mask = (df["date"] >= pd.to_datetime(min_date)) & (
+        df["date"] <= pd.to_datetime(max_date))
+    workout_mask = df["workout"].isin(
+        selected_workouts) if selected_workouts else pd.Series(True, index=df.index)
+    type_mask = df["workout_type"].isin(selected_types) if (
+        "workout_type" in df.columns and selected_types) else pd.Series(True, index=df.index)
+    muscle_mask = df["muscle_type"].isin(selected_muscles) if (
+        "muscle_type" in df.columns and selected_muscles) else pd.Series(True, index=df.index)
+    if filter_logic == "AND":
+        combined = workout_mask & type_mask & muscle_mask
+    else:
+        combined = workout_mask | type_mask | muscle_mask
+    mask &= combined
+    return df.loc[mask].copy()
+
+# =======================
+# KPI SECTION
+# =======================
+
+
+def key_performance_indicators(df):
+    st.subheader("📊 Key Performance Indicators")
+    if df.empty:
+        st.info("No data available for KPIs.")
+        return
+    total_sessions = df['date'].nunique()  # Count unique dates instead of rows
+    total_volume = df["volume"].sum()
+    avg_volume = df["volume"].mean()
+    max_volume = df["volume"].max()
+    freq_workout = df["workout"].value_counts()
+    most_freq_workout = freq_workout.idxmax()
+    freq_count = freq_workout.max()
+    max_weight = df["weight"].max()
+    avg_sets = df["sets"].mean()
+    avg_reps = df["reps"].mean()
+    avg_1rm = df["Epley_1RM"].mean()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Sessions", f"{total_sessions}")
+        st.metric("Total Volume", f"{total_volume:.0f} lbs")
+        st.metric("Avg. Volume/Session", f"{avg_volume:.0f} lbs")
+    with col2:
+        st.metric("Max Volume (Session)", f"{max_volume:.0f} lbs")
+        st.metric("Most Frequent Workout",
+                  f"{most_freq_workout} ({freq_count} sets)")  # Changed to clarify these are sets
+        st.metric("Max Weight Lifted", f"{max_weight:.0f} lbs")
+    with col3:
+        st.metric("Avg. Sets", f"{avg_sets:.1f}")
+        st.metric("Avg. Reps", f"{avg_reps:.1f}")
+        st.metric("Avg. Epley 1RM", f"{avg_1rm:.0f} lbs")
+
+# =======================
+# SUMMARY STATISTICS
+# =======================
+
+
 def summary_statistics(df):
-    """Display summary statistics."""
     st.subheader("🔍 Summary Statistics")
-
-    with st.expander("ℹ️ About This Section", expanded=False):
-        st.write("""
-        This section provides high-level metrics:
-        - **Total Sets**: Sum of all sets performed per workout.
-        - **Average Weight**: Mean weight lifted per workout.
-        - **Total Volume**: Total volume calculated as weight × reps × sets.
-        """)
-
-    # Calculate summary metrics
     total_sets = df.groupby("workout")["sets"].sum(
     ).reset_index().rename(columns={"sets": "Total Sets"})
     avg_weight = df.groupby("workout")["weight"].mean().reset_index().rename(
         columns={"weight": "Avg Weight (lbs)"})
     total_volume = df.groupby("workout")["volume"].sum(
     ).reset_index().rename(columns={"volume": "Total Volume"})
-
-    # Display in columns
     col1, col2, col3 = st.columns(3)
-
     with col1:
         st.write("**Total Sets by Workout**")
         st.dataframe(total_sets, use_container_width=True)
-
     with col2:
         st.write("**Average Weight by Workout**")
         st.dataframe(avg_weight, use_container_width=True)
-
     with col3:
         st.write("**Total Volume by Workout**")
         st.dataframe(total_volume, use_container_width=True)
 
+# =======================
+# VISUALIZATIONS
+# =======================
 
-# ------------------------------------------------
-# Visualization
-# ------------------------------------------------
+
 def visualizations(df):
-    """Display various visualizations with togglable explanations."""
     st.subheader("📈 Visualizations")
-
-    with st.expander("ℹ️ About These Charts", expanded=False):
-        st.markdown("""
-        These charts provide visual insights into your workout data:
-        - **Total Sets by Workout**: Total number of sets performed for each workout.
-        - **Average Weight by Workout**: Mean weight lifted in each workout.
-        - **Total Volume by Workout**: Total volume lifted per workout.
-        - **Volume Over Time**: Trend of your total daily volume.
-        """)
-
-    # Aggregate summaries
     sets_summary = df.groupby("workout")["sets"].sum(
     ).reset_index().rename(columns={"sets": "Total Sets"})
     weight_summary = df.groupby("workout")["weight"].mean(
     ).reset_index().rename(columns={"weight": "Avg Weight (lbs)"})
     volume_summary = df.groupby("workout")["volume"].sum(
     ).reset_index().rename(columns={"volume": "Total Volume"})
-
-    # Layout for visualizations
     col1, col2 = st.columns(2)
-
     with col1:
-        fig_sets = px.bar(
-            sets_summary,
-            x="workout",
-            y="Total Sets",
-            title="Total Sets by Workout",
-            labels={"workout": "Workout", "Total Sets": "Sets"},
-            text_auto=True
-        )
+        fig_sets = px.bar(sets_summary, x="workout", y="Total Sets",
+                          title="Total Sets by Workout", text_auto=True)
         st.plotly_chart(fig_sets, use_container_width=True)
-
-        fig_weight = px.bar(
-            weight_summary,
-            x="workout",
-            y="Avg Weight (lbs)",
-            title="Average Weight by Workout",
-            labels={"workout": "Workout",
-                    "Avg Weight (lbs)": "Average Weight (lbs)"},
-            text_auto=True
-        )
+        fig_weight = px.bar(weight_summary, x="workout", y="Avg Weight (lbs)",
+                            title="Average Weight by Workout", text_auto=True)
         st.plotly_chart(fig_weight, use_container_width=True)
-
     with col2:
-        fig_volume = px.bar(
-            volume_summary,
-            x="workout",
-            y="Total Volume",
-            title="Total Volume by Workout",
-            labels={"workout": "Workout",
-                    "Total Volume": "Volume (lbs x reps x sets)"},
-            text_auto=True
-        )
+        fig_volume = px.bar(volume_summary, x="workout", y="Total Volume",
+                            title="Total Volume by Workout", text_auto=True)
         st.plotly_chart(fig_volume, use_container_width=True)
-
-    # Additional Visualization: Volume Over Time
-    st.write("**Volume Over Time**")
     by_date = df.groupby("date")["volume"].sum(
     ).reset_index().sort_values("date")
-    fig_line = px.line(
-        by_date,
-        x="date",
-        y="volume",
-        title="Total Volume Over Time",
-        labels={"volume": "Total Volume (lbs x reps x sets)", "date": "Date"},
-        markers=True
-    )
+    fig_line = px.line(by_date, x="date", y="volume", title="Total Volume Over Time", markers=True,
+                       labels={"volume": "Total Volume", "date": "Date"})
     st.plotly_chart(fig_line, use_container_width=True)
 
+# =======================
+# PERSONAL BESTS
+# =======================
 
-# ------------------------------------------------
-# Personal Bests
-# ------------------------------------------------
+
 def personal_bests(df):
-    """Display personal bests (max weight) and 1RM estimates."""
     st.subheader("🏅 Personal Bests")
-
-    with st.expander("ℹ️ About These Results", expanded=False):
-        st.markdown("""
-        - **Max Weight by Workout**: The heaviest weight you've lifted for each workout.
-        - **Estimated 1RM**: Various formulas (Epley, Brzycki, Lombardi) used to estimate your one-rep max.
-        """)
-
-    # Personal best (max weight) per workout
     pb = df.groupby("workout")["weight"].max().reset_index().rename(
         columns={"weight": "Max Weight (lbs)"})
     st.write("**Max Weight by Workout**")
     st.dataframe(pb, use_container_width=True)
-
-    st.write("**Estimated 1RM (Epley, Brzycki, Lombardi) for Each Recorded Set**")
+    st.write("**Estimated 1RM (Epley, Brzycki, Lombardi)**")
     st.dataframe(
         df[["date", "workout", "sets", "reps", "weight",
             "Epley_1RM", "Brzycki_1RM", "Lombardi_1RM"]]
-        .rename(columns={
-            "date": "Date",
-            "workout": "Workout",
-            "sets": "Sets",
-            "reps": "Reps",
-            "weight": "Weight (lbs)"
-        }),
+        .rename(columns={"date": "Date", "workout": "Workout", "sets": "Sets", "reps": "Reps", "weight": "Weight (lbs)"}),
         use_container_width=True
     )
-
-    # 1RM Over Time - User Selection
-    st.write("**Compare 1RM Formulas Over Time**")
-    workouts = df["workout"].unique().tolist()
-    selected_workout = st.selectbox(
-        "Select a Workout for 1RM Comparison", workouts)
-
-    df_selected = df[df["workout"] ==
-                     selected_workout].copy().sort_values("date")
-
+    workouts = sorted(df["workout"].unique().tolist())
+    selected_workout = st.selectbox("Select a Workout", workouts)
+    df_selected = df[df["workout"] == selected_workout].sort_values("date")
     if not df_selected.empty:
-        fig_1rm = px.line(
-            df_selected,
-            x="date",
-            y=["Epley_1RM", "Brzycki_1RM", "Lombardi_1RM"],
-            title=f"📈 Estimated 1RM Over Time - {selected_workout}",
-            labels={
-                "value": "Estimated 1RM (lbs)", "date": "Date", "variable": "Formula"},
-            markers=True
-        )
+        fig_1rm = px.line(df_selected, x="date", y=["Epley_1RM", "Brzycki_1RM", "Lombardi_1RM"],
+                          title=f"Estimated 1RM Over Time - {selected_workout}",
+                          labels={"value": "Estimated 1RM",
+                                  "date": "Date", "variable": "Formula"},
+                          markers=True)
         st.plotly_chart(fig_1rm, use_container_width=True)
     else:
         st.info("ℹ️ No data available for the selected workout.")
 
+# =======================
+# ADVANCED ANALYTICS TAB
+# =======================
 
-# ------------------------------------------------
-# Advanced Analytics & Modeling
-# ------------------------------------------------
-def advanced_analytics(df):
-    """Provide advanced analytics and interactive filtering, including calculus & differential equations."""
-    st.subheader("🔬 Advanced Analytics & Modeling")
 
-    # ------------------------------
-    # Filter Data
-    # ------------------------------
-    with st.expander("🔧 Filter Options"):
-        col1, col2 = st.columns(2)
-        with col1:
-            min_date = st.date_input("Start Date", df["date"].min())
-        with col2:
-            max_date = st.date_input("End Date", df["date"].max())
+def advanced_analytics_tab(df):
+    st.header("Advanced Analytics & Modeling")
 
-        # Workout selection
-        all_workouts = df["workout"].unique().tolist()
-        selected_workouts = st.multiselect(
-            "Select Workouts", options=all_workouts, default=all_workouts)
+    st.subheader("Correlation Analysis")
+    corr_cols = ["sets", "reps", "weight", "volume",
+                 "Epley_1RM", "Brzycki_1RM", "Lombardi_1RM"]
+    available_cols = [
+        col for col in corr_cols if col in df.columns and df[col].notnull().any()]
+    if len(available_cols) > 1:
+        corr_matrix = df[available_cols].corr()
+        st.dataframe(corr_matrix, use_container_width=True)
+        fig_corr = px.imshow(corr_matrix, text_auto=True, aspect="auto",
+                             title="Correlation Heatmap", color_continuous_scale='RdBu', zmin=-1, zmax=1)
+        st.plotly_chart(fig_corr, use_container_width=True)
+    else:
+        st.info("Not enough numeric data for correlation analysis.")
 
-        # Apply filters
-        mask = (
-            (df["date"] >= pd.to_datetime(min_date)) &
-            (df["date"] <= pd.to_datetime(max_date)) &
-            (df["workout"].isin(selected_workouts))
-        )
-        filtered_df = df.loc[mask].copy()
+    st.subheader("Weight vs. Volume Scatter Plot")
+    if "weight" in df.columns and "volume" in df.columns:
+        corr_val = df["weight"].corr(df["volume"])
+        st.write(f"Correlation (Weight vs. Volume): {corr_val:.2f}")
+        fig_scatter = px.scatter(df, x="weight", y="volume", trendline="ols",
+                                 title="Weight vs. Volume", hover_data=["workout", "date"])
+        st.plotly_chart(fig_scatter, use_container_width=True)
 
-    if filtered_df.empty:
-        st.warning("⚠️ No data available for the selected filters.")
-        return
+    st.subheader("7-Day Moving Average of Volume")
+    try:
+        moving_avg = df.groupby("date")["volume"].sum(
+        ).reset_index().sort_values("date")
+        moving_avg["7d_MA"] = moving_avg["volume"].rolling(window=7).mean()
+        fig_ma = px.line(moving_avg, x="date", y=["volume", "7d_MA"],
+                         title="Total Volume & 7-Day Moving Average", markers=True,
+                         labels={"value": "Volume", "date": "Date", "variable": "Metric"})
+        st.plotly_chart(fig_ma, use_container_width=True)
+    except Exception as e:
+        st.error(f"Error calculating moving average: {e}")
 
-    # Initialize a container for all advanced analytics
-    advanced_container = st.container()
+    st.subheader("Derivatives of Volume Over Time")
+    vol_daily = df.groupby("date")["volume"].sum(
+    ).reset_index().sort_values("date")
+    vol_daily["vol_ma"] = vol_daily["volume"].rolling(
+        window=3, center=True, min_periods=1).mean()
+    vol_daily["dV/dt"] = vol_daily["vol_ma"].diff()
+    vol_daily["d2V/dt2"] = vol_daily["dV/dt"].diff()
+    fig_deriv = go.Figure()
+    fig_deriv.add_trace(go.Scatter(
+        x=vol_daily["date"], y=vol_daily["dV/dt"], mode='lines+markers', name='1st Derivative'))
+    fig_deriv.add_trace(go.Scatter(
+        x=vol_daily["date"], y=vol_daily["d2V/dt2"], mode='lines+markers', name='2nd Derivative'))
+    fig_deriv.update_layout(title="Derivatives of Volume Over Time",
+                            xaxis_title="Date", yaxis_title="Approx. Derivative")
+    st.plotly_chart(fig_deriv, use_container_width=True)
 
-    with advanced_container:
-        # ---------------------------------------------------
-        # 1) Correlation Matrix & Heatmap
-        # ---------------------------------------------------
-        with st.expander("1) Correlation Analysis"):
-            st.write("""
-            Analyze the relationships between different workout variables.
-            A **correlation coefficient** close to +1 indicates a strong positive relationship, 
-            while a coefficient close to -1 indicates a strong negative relationship.
-            """)
-            corr_cols = ["sets", "reps", "weight", "volume",
-                         "Epley_1RM", "Brzycki_1RM", "Lombardi_1RM"]
-            existing_corr_cols = [
-                col for col in corr_cols if col in filtered_df.columns and filtered_df[col].notnull().any()]
+    st.subheader("Differential Equation Modeling")
+    daily_df = df.groupby("date")["volume"].sum(
+    ).reset_index().sort_values("date")
+    if len(daily_df) < 5:
+        st.warning("Not enough data points for model fitting (need at least 5).")
+    else:
+        xdata = daily_df["date"].apply(
+            lambda x: x.toordinal()).values.astype(float)
+        ydata = daily_df["volume"].values.astype(float)
 
-            if len(existing_corr_cols) > 1:
-                corr_matrix = filtered_df[existing_corr_cols].corr()
-                st.write("**Correlation Matrix**")
-                st.dataframe(corr_matrix, use_container_width=True)
+        def exponential_model(x, a, b, c):
+            return a * np.exp(b * (x - x.min())) + c
 
-                fig_corr = px.imshow(
-                    corr_matrix,
-                    text_auto=True,
-                    aspect="auto",
-                    title="📈 Correlation Heatmap",
-                    color_continuous_scale='RdBu',
-                    zmin=-1,
-                    zmax=1
-                )
-                st.plotly_chart(fig_corr, use_container_width=True)
-            else:
-                st.info("Not enough numeric columns for correlation analysis.")
-
-        # ---------------------------------------------------
-        # 2) Scatter + Regression: Weight vs. Volume
-        # ---------------------------------------------------
-        with st.expander("2) Weight vs. Volume with Trendline"):
-            st.write("""
-            Explore the relationship between the **Weight** you lift and the **Volume** you achieve.
-            A trendline helps visualize the direction and strength of this relationship.
-            """)
-            corr_val = filtered_df["weight"].corr(filtered_df["volume"])
+        def logistic_model(x, L, k, x0):
+            return L / (1 + np.exp(-k * (x - x0)))
+        try:
+            initial_exp = [max(ydata), 0.01, min(ydata)]
+            popt_exp, _ = curve_fit(
+                exponential_model, xdata, ydata, p0=initial_exp, maxfev=10000)
+            y_exp_fit = exponential_model(xdata, *popt_exp)
+            residuals_exp = ydata - y_exp_fit
+            r2_exp = 1 - (np.sum(residuals_exp**2) /
+                          np.sum((ydata - np.mean(ydata))**2))
+        except Exception as e:
+            popt_exp, r2_exp = None, None
+        try:
+            initial_log = [max(ydata), 0.1, np.median(xdata)]
+            popt_log, _ = curve_fit(
+                logistic_model, xdata, ydata, p0=initial_log, maxfev=10000)
+            y_log_fit = logistic_model(xdata, *popt_log)
+            residuals_log = ydata - y_log_fit
+            r2_log = 1 - (np.sum(residuals_log**2) /
+                          np.sum((ydata - np.mean(ydata))**2))
+        except Exception as e:
+            popt_log, r2_log = None, None
+        fig_model = go.Figure()
+        fig_model.add_trace(go.Scatter(x=daily_df["date"], y=daily_df["volume"],
+                                       mode='markers', name='Actual Volume'))
+        if popt_exp is not None:
+            fig_model.add_trace(go.Scatter(x=daily_df["date"], y=y_exp_fit,
+                                           mode='lines', name=f'Exponential Fit (R²={r2_exp:.2f})'))
+        if popt_log is not None:
+            fig_model.add_trace(go.Scatter(x=daily_df["date"], y=y_log_fit,
+                                           mode='lines', name=f'Logistic Fit (R²={r2_log:.2f})'))
+        fig_model.update_layout(
+            title="Modeling Total Volume Over Time", xaxis_title="Date", yaxis_title="Volume")
+        st.plotly_chart(fig_model, use_container_width=True)
+        if popt_exp is not None:
             st.write(
-                f"**Correlation Coefficient (Weight vs. Volume):** {corr_val:.2f}")
+                f"Exponential Model: a={popt_exp[0]:.2f}, b={popt_exp[1]:.4f}, c={popt_exp[2]:.2f}, R²={r2_exp:.2f}")
+        if popt_log is not None:
+            st.write(
+                f"Logistic Model: L={popt_log[0]:.2f}, k={popt_log[1]:.4f}, x₀={popt_log[2]:.2f}, R²={r2_log:.2f}")
 
-            fig_scatter = px.scatter(
-                filtered_df,
-                x="weight",
-                y="volume",
-                trendline="ols",
-                title="Weight vs. Volume (with OLS Trendline)",
-                labels={
-                    "weight": "Weight (lbs)", "volume": "Volume (lbs x reps x sets)"},
-                hover_data=["workout", "date"]
+    st.subheader("Scatter Matrix of Key Variables")
+    scatter_matrix_fig = px.scatter_matrix(df, dimensions=["sets", "reps", "weight", "volume", "Epley_1RM"],
+                                           title="Scatter Matrix of Key Variables")
+    st.plotly_chart(scatter_matrix_fig, use_container_width=True)
+
+    st.subheader("Box & Violin Plots")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if "workout_type" in df.columns:
+            fig_box = px.box(df, x="workout_type", y="weight",
+                             title="Box Plot: Weight by Workout Type")
+            st.plotly_chart(fig_box, use_container_width=True)
+        else:
+            st.info("Workout type data not available.")
+    with col_b:
+        fig_violin = px.violin(df, x="workout", y="volume", box=True, points="all",
+                               title="Violin Plot: Volume by Workout")
+        st.plotly_chart(fig_violin, use_container_width=True)
+
+    st.subheader("7-Day Rolling Volatility of Daily Volume")
+    vol_daily = df.groupby("date")["volume"].sum(
+    ).reset_index().sort_values("date")
+    vol_daily["rolling_std"] = vol_daily["volume"].rolling(window=7).std()
+    fig_volatility = px.line(vol_daily, x="date", y="rolling_std",
+                             title="7-Day Rolling Volatility", labels={"rolling_std": "Std Dev", "date": "Date"})
+    st.plotly_chart(fig_volatility, use_container_width=True)
+
+    st.subheader("Polynomial Regression: Volume vs Weight")
+    X = df["weight"].values.reshape(-1, 1)
+    y = df["volume"].values
+    poly = PolynomialFeatures(degree=2)
+    X_poly = poly.fit_transform(X)
+    model = LinearRegression()
+    model.fit(X_poly, y)
+    df["predicted_volume"] = model.predict(X_poly)
+    fig_poly = px.scatter(df, x="weight", y="volume", title="Volume vs Weight with Polynomial Regression",
+                          labels={"volume": "Volume", "weight": "Weight"})
+    fig_poly.add_traces(px.line(df, x="weight", y="predicted_volume").data)
+    st.plotly_chart(fig_poly, use_container_width=True)
+
+    st.subheader("Cluster Analysis of Workouts")
+    features = df[["weight", "sets", "reps", "volume", "Epley_1RM"]].dropna()
+    if len(features) > 10:
+        try:
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(features)
+            kmeans = KMeans(n_clusters=3, random_state=42)
+            clusters = kmeans.fit_predict(X_scaled)
+            pca = PCA(n_components=2)
+            components = pca.fit_transform(X_scaled)
+            df_cluster = pd.DataFrame(components, columns=["PC1", "PC2"])
+            df_cluster["Cluster"] = clusters.astype(str)
+            fig_cluster = px.scatter(
+                df_cluster, x="PC1", y="PC2", color="Cluster",
+                title="KMeans Clustering (3 Clusters)",
+                labels={"PC1": "Principal Component 1",
+                        "PC2": "Principal Component 2"}
             )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            st.plotly_chart(fig_cluster, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error in cluster analysis: {e}")
+    else:
+        st.info("Not enough data for clustering analysis.")
 
-        # ---------------------------------------------------
-        # 3) Workout Frequency Over Time
-        # ---------------------------------------------------
-        with st.expander("3) Workout Frequency Over Time"):
-            st.write("""
-            Visualize how often each workout is performed over time.  
-            This helps identify patterns, such as consistently performing certain workouts or varying your routine.
-            """)
-            freq = filtered_df.groupby(
-                ["date", "workout"]).size().reset_index(name='count')
-            fig_freq = px.bar(
-                freq,
-                x="date",
-                y="count",
-                color="workout",
-                title="📊 Workout Frequency Over Time",
-                labels={"count": "Number of Sessions",
-                        "date": "Date", "workout": "Workout"},
-                barmode="group"
-            )
-            st.plotly_chart(fig_freq, use_container_width=True)
+    st.subheader("Density Heatmap: Weight vs Reps")
+    fig_density = px.density_heatmap(df, x="weight", y="reps", nbinsx=20, nbinsy=20,
+                                     title="Density Heatmap: Weight vs Reps")
+    st.plotly_chart(fig_density, use_container_width=True)
 
-        # ---------------------------------------------------
-        # 4) Volume Distribution by Workout
-        # ---------------------------------------------------
-        with st.expander("4) Volume Distribution by Workout"):
-            st.write("""
-            A box plot illustrating the distribution of **Volume** for each workout.  
-            It highlights the median, quartiles, and potential outliers.
-            """)
-            fig_volume_dist = px.box(
-                filtered_df,
-                x="workout",
-                y="volume",
-                title="📦 Volume Distribution by Workout",
-                labels={
-                    "volume": "Volume (lbs x reps x sets)", "workout": "Workout"}
-            )
-            st.plotly_chart(fig_volume_dist, use_container_width=True)
+    st.subheader("Regression Analysis for 1RM Prediction")
+    features_reg = df[["weight", "reps", "sets"]].dropna()
+    target = df.loc[features_reg.index, "Epley_1RM"]
+    reg = LinearRegression()
+    reg.fit(features_reg, target)
+    df["predicted_1RM"] = reg.predict(df[["weight", "reps", "sets"]])
+    fig_reg = px.scatter(df, x="Epley_1RM", y="predicted_1RM",
+                         title="Actual vs Predicted Epley 1RM",
+                         labels={"Epley_1RM": "Actual Epley 1RM", "predicted_1RM": "Predicted Epley 1RM"})
+    fig_reg.add_trace(go.Scatter(x=df["Epley_1RM"], y=df["Epley_1RM"],
+                                 mode="lines", name="Ideal Fit"))
+    st.plotly_chart(fig_reg, use_container_width=True)
 
-        # ---------------------------------------------------
-        # 5) Top 5 Workouts by Volume
-        # ---------------------------------------------------
-        with st.expander("5) Top 5 Workouts by Total Volume"):
-            st.write("""
-            Identify which workouts contribute the most to your total volume.  
-            Focus on these for potential progression or optimization.
-            """)
-            top5 = (
-                filtered_df.groupby("workout")["volume"]
-                .sum()
-                .reset_index()
-                .sort_values("volume", ascending=False)
-                .head(5)
-            )
-            st.dataframe(
-                top5.rename(columns={"workout": "Workout",
-                            "volume": "Total Volume"}),
-                use_container_width=True
-            )
-
-        # ---------------------------------------------------
-        # 6) Moving Average of Volume (7-Day)
-        # ---------------------------------------------------
-        with st.expander("6) 7-Day Moving Average of Total Volume"):
-            st.write("""
-            The **7-Day Moving Average** smooths out daily fluctuations to reveal longer-term trends in your total volume.
-            """)
-            try:
-                moving_avg = filtered_df.groupby(
-                    "date")["volume"].sum().reset_index().sort_values("date")
-                moving_avg["7d_MA"] = moving_avg["volume"].rolling(
-                    window=7).mean()
-
-                fig_moving_avg = px.line(
-                    moving_avg,
-                    x="date",
-                    y=["volume", "7d_MA"],
-                    title="📈 Total Volume and 7-Day Moving Average Over Time",
-                    labels={"date": "Date", "value": "Total Volume (lbs x reps x sets)",
-                            "variable": "Metric"},
-                    markers=True
-                )
-                st.plotly_chart(fig_moving_avg, use_container_width=True)
-            except Exception as e:
-                st.error(
-                    f"❌ An error occurred while calculating moving average: {e}")
-
-        # ---------------------------------------------------
-        # 7) Day-of-Week Analysis
-        # ---------------------------------------------------
-        with st.expander("7) Day-of-Week Analysis"):
-            st.write("""
-            Analyze on which days of the week you train the most.  
-            This can help in scheduling and ensuring balanced training across the week.
-            """)
-            filtered_df["day_of_week"] = filtered_df["date"].dt.day_name()
-            day_volume = (
-                filtered_df.groupby("day_of_week")["volume"]
-                .sum()
-                .reindex(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
-            )
-            fig_day = px.bar(
-                day_volume.reset_index(),
-                x="day_of_week",
-                y="volume",
-                title="Total Volume by Day of Week",
-                labels={"day_of_week": "Day of Week", "volume": "Total Volume"}
-            )
-            st.plotly_chart(fig_day, use_container_width=True)
-
-        # ---------------------------------------------------
-        # 8) Derivatives & Calculus
-        # ---------------------------------------------------
-        with st.expander("8) Calculus: Derivatives of Volume Over Time"):
-            st.write("""
-            Using finite differences to approximate the **1st derivative** (rate of change) and **2nd derivative** (acceleration) of your total volume over time.
-            - **1st derivative (dV/dt)**: Indicates whether your volume is increasing or decreasing.
-            - **2nd derivative (d²V/dt²)**: Shows the acceleration of volume changes.
-            """)
-
-            # For derivative approximation, we need daily volumes in chronological order
-            vol_daily = filtered_df.groupby(
-                "date")["volume"].sum().reset_index().sort_values("date")
-            vol_daily["volume_ma"] = vol_daily["volume"].rolling(
-                window=3, center=True, min_periods=1).mean()
-
-            # Approximate 1st derivative via finite difference
-            vol_daily["dV/dt"] = vol_daily["volume_ma"].diff()
-
-            # Approximate 2nd derivative
-            vol_daily["d2V/dt2"] = vol_daily["dV/dt"].diff()
-
-            # Plot 1st derivative and 2nd derivative
-            fig_deriv = go.Figure()
-            fig_deriv.add_trace(go.Scatter(
-                x=vol_daily["date"], y=vol_daily["dV/dt"], mode='lines+markers',
-                name='dV/dt (1st derivative)'
-            ))
-            fig_deriv.add_trace(go.Scatter(
-                x=vol_daily["date"], y=vol_daily["d2V/dt2"], mode='lines+markers',
-                name='d²V/dt² (2nd derivative)'
-            ))
-            fig_deriv.update_layout(
-                title="Rate of Change (1st & 2nd Derivative) of Volume Over Time",
-                xaxis_title="Date",
-                yaxis_title="Approx. Derivative of Volume"
-            )
-            st.plotly_chart(fig_deriv, use_container_width=True)
-
-            st.info("""
-            - **Positive 1st derivative**: Volume is increasing day-to-day.
-            - **Negative 1st derivative**: Volume is decreasing day-to-day.
-            - **Positive 2nd derivative**: The rate of increase is accelerating.
-            - **Negative 2nd derivative**: The rate of increase is decelerating or rate of decrease is accelerating.
-            """)
-
-        # ---------------------------------------------------
-        # 9) Differential Equation Modeling (Exponential & Logistic)
-        # ---------------------------------------------------
-        with st.expander("9) Differential Equation Modeling: Exponential & Logistic Fits"):
-            st.write("""
-            Fit your total volume over time to **Exponential** and **Logistic** growth models to identify underlying patterns.
-            - **Exponential Model**: Assumes continuous growth.
-            - **Logistic Model**: Accounts for growth saturation.
-            """)
-
-            daily_df = filtered_df.groupby(
-                "date")["volume"].sum().reset_index().sort_values("date")
-            if len(daily_df) < 5:
-                st.warning(
-                    "Not enough data points to fit advanced models (need at least 5).")
-            else:
-                # Convert date to ordinal
-                xdata = daily_df["date"].apply(
-                    lambda x: x.toordinal()).values.astype(float)
-                ydata = daily_df["volume"].values.astype(float)
-
-                # Exponential Fit
-                def exponential_model(x, a, b, c):
-                    return a * np.exp(b * (x - x.min())) + c
-
-                # Logistic Fit
-                def logistic_model(x, L, k, x0):
-                    return L / (1 + np.exp(-k * (x - x0)))
-
-                # Try Exponential
-                try:
-                    initial_exp = [max(ydata), 0.01, min(ydata)]
-                    popt_exp, pcov_exp = curve_fit(
-                        exponential_model, xdata, ydata, p0=initial_exp, maxfev=10000)
-                    a_fit, b_fit, c_fit = popt_exp
-                    y_exp_fit = exponential_model(xdata, a_fit, b_fit, c_fit)
-                    # Calculate R^2
-                    residuals_exp = ydata - y_exp_fit
-                    ss_res_exp = np.sum(residuals_exp**2)
-                    ss_tot_exp = np.sum((ydata - np.mean(ydata))**2)
-                    r2_exp = 1 - (ss_res_exp / ss_tot_exp)
-                except Exception as e:
-                    popt_exp, r2_exp = None, None
-
-                # Try Logistic
-                try:
-                    initial_log = [max(ydata), 0.1, np.median(xdata)]
-                    popt_log, pcov_log = curve_fit(
-                        logistic_model, xdata, ydata, p0=initial_log, maxfev=10000)
-                    L_fit, k_fit, x0_fit = popt_log
-                    y_log_fit = logistic_model(xdata, L_fit, k_fit, x0_fit)
-                    # Calculate R^2
-                    residuals_log = ydata - y_log_fit
-                    ss_res_log = np.sum(residuals_log**2)
-                    ss_tot_log = np.sum((ydata - np.mean(ydata))**2)
-                    r2_log = 1 - (ss_res_log / ss_tot_log)
-                except Exception as e:
-                    popt_log, r2_log = None, None
-
-                # Plot results
-                fig_model = go.Figure()
-                # Actual data
-                fig_model.add_trace(go.Scatter(
-                    x=daily_df["date"], y=daily_df["volume"], mode='markers',
-                    name='Actual Volume'
-                ))
-
-                # Exponential best fit
-                if popt_exp is not None:
-                    fig_model.add_trace(go.Scatter(
-                        x=daily_df["date"], y=y_exp_fit, mode='lines',
-                        name=f'Exponential Fit (R²={r2_exp:.2f})'
-                    ))
-
-                # Logistic best fit
-                if popt_log is not None:
-                    fig_model.add_trace(go.Scatter(
-                        x=daily_df["date"], y=y_log_fit, mode='lines',
-                        name=f'Logistic Fit (R²={r2_log:.2f})'
-                    ))
-
-                fig_model.update_layout(
-                    title="Exponential & Logistic Modeling of Volume Over Time",
-                    xaxis_title="Date",
-                    yaxis_title="Total Daily Volume"
-                )
-                st.plotly_chart(fig_model, use_container_width=True)
-
-                if popt_exp is not None:
-                    st.write(
-                        f"**Exponential Model Parameters**: a={popt_exp[0]:.2f}, b={popt_exp[1]:.4f}, c={popt_exp[2]:.2f}, R²={r2_exp:.2f}")
-                if popt_log is not None:
-                    st.write(
-                        f"**Logistic Model Parameters**: L={popt_log[0]:.2f}, k={popt_log[1]:.4f}, x₀={popt_log[2]:.2f}, R²={r2_log:.2f}")
-
-        # ---------------------------------------------------
-        # 10) Time Series Forecasting
-        # ---------------------------------------------------
-        with st.expander("10) Time Series Forecasting with Prophet"):
-            st.write("""
-            Forecast your total daily volume for the next 30 days using **Facebook Prophet**.  
-            This helps in planning and understanding future training loads.
-            """)
-
-            daily_df = filtered_df.groupby(
-                "date")["volume"].sum().reset_index().sort_values("date")
-
-            if len(daily_df) < 10:
-                st.warning(
-                    "Not enough data points to perform forecasting (need at least 10).")
-            else:
-                # Prepare data for Prophet
-                prophet_df = daily_df.rename(
-                    columns={"date": "ds", "volume": "y"})
-                m = Prophet(daily_seasonality=True)
-                try:
-                    m.fit(prophet_df)
-                    future = m.make_future_dataframe(periods=30)
-                    forecast = m.predict(future)
-
-                    # Plot forecast
-                    fig_prophet = m.plot(forecast)
-                    st.pyplot(fig_prophet, use_container_width=True)
-
-                    # Plot forecast components
-                    fig_components = m.plot_components(forecast)
-                    st.pyplot(fig_components, use_container_width=True)
-
-                    # Display forecast metrics
-                    st.write("**Forecast Summary**")
-                    forecast_summary = forecast[[
-                        'ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
-                    st.dataframe(forecast_summary.rename(columns={
-                        "ds": "Date",
-                        "yhat": "Forecasted Volume",
-                        "yhat_lower": "Lower Confidence Interval",
-                        "yhat_upper": "Upper Confidence Interval"
-                    }), use_container_width=True)
-                except Exception as e:
-                    st.error(
-                        f"❌ An error occurred during forecasting: {e}")
+# =======================
+# FUTURE PLANNING TAB
+# =======================
 
 
-# ------------------------------------------------
-# Download Reports
-# ------------------------------------------------
-def download_reports(df):
-    """Allow users to download analytics reports and charts."""
-    st.subheader("📥 Download Reports")
+def future_planning_tab(df):
+    st.header("Future Workout Planning")
 
-    with st.expander("ℹ️ About Download Options", expanded=False):
-        st.markdown("""
-        - **Raw Data**: Download your workout data as a CSV file.
-        - **Analytics Report**: Download a comprehensive Excel report containing various analytics and models.
-        """)
+    st.subheader("Weekly Volume Trend")
+    df_weekly = df.groupby(pd.Grouper(key="date", freq="W")).agg(
+        {"volume": "sum"}).reset_index()
+    fig_weekly = px.bar(df_weekly, x="date", y="volume", title="Weekly Total Volume",
+                        labels={"volume": "Volume", "date": "Week Ending"})
+    st.plotly_chart(fig_weekly, use_container_width=True)
 
-    # Prepare data for download
+    st.subheader("Volume by Muscle Group")
+    if "muscle_type" in df.columns:
+        muscle_volume = df.groupby("muscle_type")["volume"].sum().reset_index()
+        fig_muscle = px.pie(muscle_volume, names="muscle_type", values="volume",
+                            title="Volume Distribution by Muscle Group")
+        st.plotly_chart(fig_muscle, use_container_width=True)
+    else:
+        st.info("Muscle type data not available.")
+
+    st.subheader("Workout Calendar Heatmap")
+    df_calendar = df.copy()
+    df_calendar["week"] = df_calendar["date"].dt.strftime("%Y-%U")
+    df_calendar["weekday"] = df_calendar["date"].dt.day_name()
+    weekday_order = ["Monday", "Tuesday", "Wednesday",
+                     "Thursday", "Friday", "Saturday", "Sunday"]
+    df_calendar["weekday"] = pd.Categorical(
+        df_calendar["weekday"], categories=weekday_order, ordered=True)
+    pivot = df_calendar.pivot_table(
+        index="weekday", columns="week", values="volume", aggfunc="sum", fill_value=0)
+    fig_calendar = px.imshow(pivot, labels=dict(x="Week", y="Day of Week", color="Volume"),
+                             x=pivot.columns, y=pivot.index, aspect="auto",
+                             title="Calendar Heatmap of Volume")
+    st.plotly_chart(fig_calendar, use_container_width=True)
+
+    st.subheader("Days Since Last Workout by Muscle Group")
+    if "muscle_type" in df.columns:
+        today = pd.Timestamp.today().normalize()
+        last_dates = df.groupby("muscle_type")["date"].max().reset_index()
+        last_dates["days_since"] = (today - last_dates["date"]).dt.days
+        fig_days = px.bar(last_dates, x="muscle_type", y="days_since",
+                          title="Days Since Last Workout by Muscle Group",
+                          labels={"muscle_type": "Muscle Group", "days_since": "Days Since Last Session"})
+        st.plotly_chart(fig_days, use_container_width=True)
+    else:
+        st.info("Muscle type data not available.")
+
+    st.subheader("Forecast Future Weekly Volume")
+    df_weekly = df.groupby(pd.Grouper(key="date", freq="W")).agg(
+        {"volume": "sum"}).reset_index()
+    if len(df_weekly) >= 10:
+        forecast_df = df_weekly.rename(columns={"date": "ds", "volume": "y"})
+        m = Prophet(weekly_seasonality=True)
+        try:
+            m.fit(forecast_df)
+            future = m.make_future_dataframe(periods=4, freq="W")
+            forecast = m.predict(future)
+            fig_forecast = m.plot(forecast)
+            st.pyplot(fig_forecast, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error forecasting weekly volume: {e}")
+    else:
+        st.info("Not enough data points for forecasting future weekly volume.")
+
+    st.subheader("Session Frequency Over Time")
+    sessions = df.groupby(pd.Grouper(key="date", freq="W")
+                          ).size().reset_index(name="sessions")
+    fig_sessions = px.line(sessions, x="date", y="sessions",
+                           title="Weekly Session Frequency",
+                           labels={"sessions": "Number of Sessions", "date": "Week Ending"})
+    st.plotly_chart(fig_sessions, use_container_width=True)
+
+    st.subheader("Rolling Average of Epley 1RM")
+    df_sorted = df.sort_values("date")
+    df_sorted["rolling_1RM"] = df_sorted["Epley_1RM"].rolling(
+        window=7, min_periods=1).mean()
+    fig_rolling_1rm = px.line(df_sorted, x="date", y="rolling_1RM",
+                              title="7-Day Rolling Average of Epley 1RM",
+                              labels={"rolling_1RM": "Rolling Average Epley 1RM", "date": "Date"})
+    st.plotly_chart(fig_rolling_1rm, use_container_width=True)
+
+    st.subheader("Monthly Volume Trend")
+    df_monthly = df.copy()
+    df_monthly["month"] = df_monthly["date"].dt.to_period("M").astype(str)
+    monthly_volume = df_monthly.groupby("month")["volume"].sum().reset_index()
+    fig_monthly = px.bar(monthly_volume, x="month", y="volume",
+                         title="Monthly Total Volume",
+                         labels={"volume": "Volume", "month": "Month"})
+    st.plotly_chart(fig_monthly, use_container_width=True)
+
+    st.subheader("1RM Improvement Over Time")
+    improvement = []
+    for workout in df["workout"].unique():
+        df_work = df[df["workout"] == workout].sort_values("date")
+        if len(df_work) > 1:
+            first = df_work.iloc[0]["Epley_1RM"]
+            last = df_work.iloc[-1]["Epley_1RM"]
+            pct_improve = ((last - first) / first) * 100 if first != 0 else 0
+            improvement.append(
+                {"workout": workout, "pct_improve": pct_improve})
+    if improvement:
+        df_improve = pd.DataFrame(improvement)
+        fig_improve_1rm = px.bar(df_improve, x="workout", y="pct_improve",
+                                 title="Percentage Improvement in Epley 1RM (First vs. Latest)",
+                                 labels={"pct_improve": "Improvement (%)", "workout": "Workout"})
+        st.plotly_chart(fig_improve_1rm, use_container_width=True)
+    else:
+        st.info("Not enough data for 1RM improvement analysis.")
+
+# =======================
+# DASHBOARD TAB
+# =======================
+
+
+def dashboard_tab(df):
+    st.header("Dashboard")
+    key_performance_indicators(df)
+    st.markdown("---")
+    st.subheader("Summary Statistics")
+    summary_statistics(df)
+    st.markdown("---")
+    st.subheader("Visualizations")
+    visualizations(df)
+    st.markdown("---")
+    st.subheader("Personal Bests")
+    personal_bests(df)
+
+# =======================
+# DOWNLOAD & RAW DATA TAB
+# =======================
+
+
+def download_reports_tab(df):
+    st.header("Downloads")
+    st.markdown("""
+    **Download Options:**
+    - Download the **raw data** as CSV.
+    - Download a comprehensive **Excel report** with multiple sheets.
+    """)
     csv = df.to_csv(index=False).encode('utf-8')
-
-    # Download button for raw data
-    st.download_button(
-        label="📄 Download Raw Data as CSV",
-        data=csv,
-        file_name='workout_data.csv',
-        mime='text/csv',
-    )
-
-    # Generate reports in Excel with multiple sheets
+    st.download_button(label="📄 Download Raw Data as CSV", data=csv,
+                       file_name='workout_data.csv', mime='text/csv')
     if st.button("📊 Download Analytics Report as Excel"):
         try:
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Summary Statistics
                 summary = {
                     "Total Sets": df.groupby("workout")["sets"].sum(),
                     "Average Weight": df.groupby("workout")["weight"].mean(),
@@ -729,54 +610,78 @@ def download_reports(df):
                 }
                 for sheet_name, data in summary.items():
                     data.to_frame().to_excel(writer, sheet_name=sheet_name)
-
-                # Full Data
                 df.to_excel(writer, sheet_name="FullData", index=False)
-
-                # Correlation
                 corr_cols = ["sets", "reps", "weight", "volume",
                              "Epley_1RM", "Brzycki_1RM", "Lombardi_1RM"]
-                existing_corr_cols = [
+                available_corr_cols = [
                     col for col in corr_cols if col in df.columns and df[col].notnull().any()]
-                if len(existing_corr_cols) > 1:
-                    correlation = df[existing_corr_cols].corr()
-                    correlation.to_excel(writer, sheet_name="Correlation")
-
-                # PCA Results
-                # Assuming PCA was run and stored, else skip
-                # Similarly for other analyses
-
-                # Additional sheets can be added here
-
+                if len(available_corr_cols) > 1:
+                    df[available_corr_cols].corr().to_excel(
+                        writer, sheet_name="Correlation")
             processed_data = output.getvalue()
             b64 = base64.b64encode(processed_data).decode()
             href = f'<a href="data:application/octet-stream;base64,{b64}" download="analytics_report.xlsx">📥 Click here to download the Excel report</a>'
             st.markdown(href, unsafe_allow_html=True)
         except Exception as e:
-            st.error(f"❌ An error occurred while generating the report: {e}")
+            st.error(f"❌ Error generating the Excel report: {e}")
 
 
-# ------------------------------------------------
-# Polynomial Regression Class
-# ------------------------------------------------
-class PolynomialRegression:
-    def __init__(self, degree=2):
-        self.degree = degree
-        self.poly_features = None
-        self.model = LinearRegression()
+def raw_data_tab(df):
+    st.header("Raw Data")
+    st.dataframe(df, use_container_width=True)
 
-    def fit(self, X, y):
-        self.poly_features = self._polynomial_features(X)
-        self.model.fit(self.poly_features, y)
+# =======================
+# MAIN APPLICATION
+# =======================
 
-    def predict(self, X):
-        poly_X = self._polynomial_features(X)
-        return self.model.predict(poly_X)
 
-    def _polynomial_features(self, X):
-        from sklearn.preprocessing import PolynomialFeatures
-        poly = PolynomialFeatures(degree=self.degree)
-        return poly.fit_transform(X)
+def main():
+    st.title("📊 Workout Progress Dashboard")
+    df_workouts = load_workouts()
+    if df_workouts.empty:
+        st.warning("⚠️ No workouts logged yet. Please add or upload data.")
+        return
+
+    # Preprocessing
+    df_workouts["date"] = pd.to_datetime(df_workouts["date"], errors="coerce")
+    df_workouts["volume"] = df_workouts["weight"] * \
+        df_workouts["sets"] * df_workouts["reps"]
+    df_workouts["Epley_1RM"] = df_workouts.apply(
+        lambda row: epley_1rm(row["weight"], row["reps"]), axis=1)
+    df_workouts["Brzycki_1RM"] = df_workouts.apply(
+        lambda row: brzycki_1rm(row["weight"], row["reps"]), axis=1)
+    df_workouts["Lombardi_1RM"] = df_workouts.apply(
+        lambda row: lombardi_1rm(row["weight"], row["reps"]), axis=1)
+
+    filtered_df = filter_data(df_workouts)
+    st.sidebar.markdown("### Filter Summary")
+    if not filtered_df.empty:
+        st.sidebar.write(
+            f"**Date Range:** {filtered_df['date'].min().date()} to {filtered_df['date'].max().date()}")
+        st.sidebar.write(
+            f"**Workouts:** {', '.join(sorted(filtered_df['workout'].unique()))}")
+        if "workout_type" in filtered_df.columns:
+            st.sidebar.write(
+                f"**Workout Types:** {', '.join(sorted(filtered_df['workout_type'].dropna().unique()))}")
+        if "muscle_type" in filtered_df.columns:
+            st.sidebar.write(
+                f"**Muscle Types:** {', '.join(sorted(filtered_df['muscle_type'].dropna().unique()))}")
+    else:
+        st.sidebar.info("No data matches the current filters.")
+
+    # Define Tabs
+    tabs = st.tabs(["Dashboard", "Advanced Analytics",
+                   "Future Planning", "Downloads", "Raw Data"])
+    with tabs[0]:
+        dashboard_tab(filtered_df)
+    with tabs[1]:
+        advanced_analytics_tab(filtered_df)
+    with tabs[2]:
+        future_planning_tab(filtered_df)
+    with tabs[3]:
+        download_reports_tab(filtered_df)
+    with tabs[4]:
+        raw_data_tab(filtered_df)
 
 
 if __name__ == "__main__":
