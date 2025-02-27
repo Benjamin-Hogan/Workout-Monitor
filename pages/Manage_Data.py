@@ -32,8 +32,194 @@ def main():
         manage_body_metrics()
 
 
+def import_csv_to_workouts(csv_file):
+    """Import workout data from a CSV file."""
+    try:
+        # Read the CSV file
+        df = pd.read_csv(csv_file)
+
+        # Validate required columns
+        required_columns = ['workout', 'weight', 'sets', 'reps', 'date']
+        missing_columns = [
+            col for col in required_columns if col not in df.columns]
+
+        if missing_columns:
+            return False, f"Missing required columns: {', '.join(missing_columns)}"
+
+        # Convert date format if needed
+        df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+
+        # Add missing columns with default values if they don't exist
+        if 'muscle_type' not in df.columns:
+            df['muscle_type'] = None
+        if 'workout_type' not in df.columns:
+            df['workout_type'] = None
+
+        # Insert data into database
+        with create_connection() as conn:
+            cursor = conn.cursor()
+
+            # Get existing exercises to update the exercises table if needed
+            cursor.execute("SELECT name FROM exercises")
+            existing_exercises = {row[0] for row in cursor.fetchall()}
+
+            # Insert new exercises if they don't exist
+            new_exercises = []
+            for workout in df['workout'].unique():
+                if workout not in existing_exercises:
+                    # Get muscle_type and workout_type for this exercise if available
+                    exercise_data = df[df['workout'] == workout].iloc[0]
+                    muscle_type = exercise_data.get('muscle_type')
+                    workout_type = exercise_data.get('workout_type')
+
+                    new_exercises.append((workout, muscle_type, workout_type))
+
+            if new_exercises:
+                cursor.executemany(
+                    "INSERT INTO exercises (name, muscle_type, workout_type) VALUES (?, ?, ?)",
+                    new_exercises
+                )
+
+            # Insert workout data
+            for _, row in df.iterrows():
+                cursor.execute("""
+                    INSERT INTO workouts (workout, weight, sets, reps, date, muscle_type, workout_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    row['workout'],
+                    row['weight'],
+                    row['sets'],
+                    row['reps'],
+                    row['date'],
+                    row.get('muscle_type'),
+                    row.get('workout_type')
+                ))
+
+            conn.commit()
+
+            # Increment the database modification counter
+            if "db_modification_counter" in st.session_state:
+                st.session_state.db_modification_counter += 1
+            else:
+                st.session_state.db_modification_counter = 1
+
+        return True, f"Successfully imported {len(df)} workout records."
+
+    except Exception as e:
+        return False, f"Error importing data: {str(e)}"
+
+
+def import_csv_to_body_metrics(csv_file):
+    """Import body metrics data from a CSV file."""
+    try:
+        # Read the CSV file
+        df = pd.read_csv(csv_file)
+
+        # Validate required columns
+        required_columns = ['entry_date', 'user_weight']
+        missing_columns = [
+            col for col in required_columns if col not in df.columns]
+
+        if missing_columns:
+            return False, f"Missing required columns: {', '.join(missing_columns)}"
+
+        # Convert date format if needed
+        df['entry_date'] = pd.to_datetime(
+            df['entry_date']).dt.strftime('%Y-%m-%d')
+
+        # Add missing columns with default values if they don't exist
+        optional_columns = ['height', 'age', 'gender', 'body_fat', 'chest', 'waist',
+                            'hips', 'arms', 'glutes', 'thigh', 'calf', 'neck']
+
+        for col in optional_columns:
+            if col not in df.columns:
+                df[col] = None
+
+        # Insert data into database
+        with create_connection() as conn:
+            cursor = conn.cursor()
+
+            # Insert body metrics data
+            for _, row in df.iterrows():
+                cursor.execute("""
+                    INSERT INTO body_metrics (
+                        entry_date, user_weight, height, age, gender, body_fat, 
+                        chest, waist, hips, arms, glutes, thigh, calf, neck
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    row['entry_date'],
+                    row['user_weight'],
+                    row.get('height'),
+                    row.get('age'),
+                    row.get('gender'),
+                    row.get('body_fat'),
+                    row.get('chest'),
+                    row.get('waist'),
+                    row.get('hips'),
+                    row.get('arms'),
+                    row.get('glutes'),
+                    row.get('thigh'),
+                    row.get('calf'),
+                    row.get('neck')
+                ))
+
+            conn.commit()
+
+            # Increment the database modification counter
+            if "db_modification_counter" in st.session_state:
+                st.session_state.db_modification_counter += 1
+            else:
+                st.session_state.db_modification_counter = 1
+
+        return True, f"Successfully imported {len(df)} body metrics records."
+
+    except Exception as e:
+        return False, f"Error importing data: {str(e)}"
+
+
 def manage_workouts():
     st.subheader("Manage Workout Data")
+
+    # -----------------------------------
+    # Import Workouts from CSV
+    # -----------------------------------
+    st.write("### Import Workout Data")
+
+    with st.expander("Import from CSV", expanded=False):
+        st.write("""
+        Upload a CSV file with workout data. The file must contain the following columns:
+        - workout (exercise name)
+        - weight (in lbs)
+        - sets (number of sets)
+        - reps (number of reps)
+        - date (in YYYY-MM-DD format)
+        
+        Optional columns:
+        - muscle_type (Chest, Back, Legs, etc.)
+        - workout_type (Push, Pull, Leg, etc.)
+        """)
+
+        uploaded_file = st.file_uploader(
+            "Choose a CSV file", type="csv", key="workout_csv_uploader")
+
+        if uploaded_file is not None:
+            # Show a preview of the CSV
+            df_preview = pd.read_csv(uploaded_file)
+            st.write("Preview of CSV data:")
+            st.dataframe(df_preview.head(5), use_container_width=True)
+
+            # Reset file pointer to beginning
+            uploaded_file.seek(0)
+
+            if st.button("Import Data", key="import_workout_button"):
+                with st.spinner("Importing data..."):
+                    success, message = import_csv_to_workouts(uploaded_file)
+
+                    if success:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
 
     # Fetch data from the database
     with create_connection() as conn:
@@ -201,6 +387,48 @@ def manage_workouts():
 
 def manage_body_metrics():
     st.subheader("Manage Body Metrics Data")
+
+    # -----------------------------------
+    # Import Body Metrics from CSV
+    # -----------------------------------
+    st.write("### Import Body Metrics Data")
+
+    with st.expander("Import from CSV", expanded=False):
+        st.write("""
+        Upload a CSV file with body metrics data. The file must contain the following columns:
+        - entry_date (in YYYY-MM-DD format)
+        - user_weight (in lbs)
+        
+        Optional columns:
+        - height (in inches)
+        - age
+        - gender
+        - body_fat (percentage)
+        - chest, waist, hips, arms, glutes, thigh, calf, neck (all in inches)
+        """)
+
+        uploaded_file = st.file_uploader(
+            "Choose a CSV file", type="csv", key="metrics_csv_uploader")
+
+        if uploaded_file is not None:
+            # Show a preview of the CSV
+            df_preview = pd.read_csv(uploaded_file)
+            st.write("Preview of CSV data:")
+            st.dataframe(df_preview.head(5), use_container_width=True)
+
+            # Reset file pointer to beginning
+            uploaded_file.seek(0)
+
+            if st.button("Import Data", key="import_metrics_button"):
+                with st.spinner("Importing data..."):
+                    success, message = import_csv_to_body_metrics(
+                        uploaded_file)
+
+                    if success:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
 
     # Fetch data from the database
     with create_connection() as conn:
