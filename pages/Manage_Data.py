@@ -134,40 +134,14 @@ def import_csv_to_body_metrics(csv_file):
         df['entry_date'] = pd.to_datetime(
             df['entry_date']).dt.strftime('%Y-%m-%d')
 
-        # Add missing columns with default values if they don't exist
-        optional_columns = ['height', 'age', 'gender', 'body_fat', 'chest', 'waist',
-                            'hips', 'arms', 'glutes', 'thigh', 'calf', 'neck']
+        # Check for empty strings and convert to None/NaN
+        for col in df.columns:
+            if df[col].dtype == 'object' and col != 'entry_date' and col != 'gender':
+                df[col] = df[col].replace('', np.nan)
 
-        # Show which columns are missing for debugging
-        missing_optional = [
-            col for col in optional_columns if col not in df.columns]
-        if missing_optional:
-            st.info(f"Adding missing columns: {', '.join(missing_optional)}")
-
-        for col in optional_columns:
-            if col not in df.columns:
-                df[col] = None
-
-        # Display the DataFrame after adding missing columns
-        st.write("DataFrame with all columns:")
+        # Display the DataFrame after initial processing
+        st.write("DataFrame after initial processing:")
         st.dataframe(df.head(2))
-
-        # Calculate body fat if not provided but we have enough data to estimate it
-        for idx, row in df.iterrows():
-            if (pd.isna(row['body_fat']) or row['body_fat'] is None) and not pd.isna(row['user_weight']) and not pd.isna(row['height']):
-                # Check if we have enough data to calculate body fat
-                gender = row['gender'] if not pd.isna(row['gender']) else None
-                age = row['age'] if not pd.isna(row['age']) else None
-                neck = row['neck'] if not pd.isna(row['neck']) else None
-                waist = row['waist'] if not pd.isna(row['waist']) else None
-                hips = row['hips'] if not pd.isna(row['hips']) else None
-
-                if gender is not None and age is not None:
-                    # Calculate body fat using the utility function
-                    body_fat = estimate_body_fat(
-                        row['user_weight'], row['height'], age, gender, neck, waist, hips
-                    )
-                    df.at[idx, 'body_fat'] = body_fat
 
         # Insert data into database
         with create_connection() as conn:
@@ -179,40 +153,53 @@ def import_csv_to_body_metrics(csv_file):
 
             for idx, row in df.iterrows():
                 try:
-                    # Print row values for debugging
-                    if idx == 0:  # Only print the first row to avoid cluttering the UI
-                        st.write("First row values:")
-                        for col in ['entry_date', 'user_weight', 'height', 'age', 'gender', 'body_fat',
-                                    'chest', 'waist', 'hips', 'arms', 'glutes', 'thigh', 'calf', 'neck']:
-                            st.write(
-                                f"{col}: {row[col] if col in row and not pd.isna(row[col]) else 'N/A'}")
-
-                    # Ensure all values are properly handled
-                    height = float(row['height']) if 'height' in row and not pd.isna(
+                    # Convert values to appropriate types, handling NaN values
+                    user_weight = float(row['user_weight']) if pd.notna(
+                        row['user_weight']) else None
+                    height = float(row['height']) if 'height' in row and pd.notna(
                         row['height']) else None
-                    age = int(row['age']) if 'age' in row and not pd.isna(
+                    age = int(float(row['age'])) if 'age' in row and pd.notna(
                         row['age']) else None
-                    gender = str(row['gender']) if 'gender' in row and not pd.isna(
+                    gender = str(row['gender']) if 'gender' in row and pd.notna(
                         row['gender']) else None
-                    body_fat = float(row['body_fat']) if 'body_fat' in row and not pd.isna(
+                    body_fat = float(row['body_fat']) if 'body_fat' in row and pd.notna(
                         row['body_fat']) else None
-                    chest = float(row['chest']) if 'chest' in row and not pd.isna(
+                    chest = float(row['chest']) if 'chest' in row and pd.notna(
                         row['chest']) else None
-                    waist = float(row['waist']) if 'waist' in row and not pd.isna(
+                    waist = float(row['waist']) if 'waist' in row and pd.notna(
                         row['waist']) else None
-                    hips = float(row['hips']) if 'hips' in row and not pd.isna(
+                    hips = float(row['hips']) if 'hips' in row and pd.notna(
                         row['hips']) else None
-                    arms = float(row['arms']) if 'arms' in row and not pd.isna(
+                    arms = float(row['arms']) if 'arms' in row and pd.notna(
                         row['arms']) else None
-                    glutes = float(row['glutes']) if 'glutes' in row and not pd.isna(
+                    glutes = float(row['glutes']) if 'glutes' in row and pd.notna(
                         row['glutes']) else None
-                    thigh = float(row['thigh']) if 'thigh' in row and not pd.isna(
+                    thigh = float(row['thigh']) if 'thigh' in row and pd.notna(
                         row['thigh']) else None
-                    calf = float(row['calf']) if 'calf' in row and not pd.isna(
+                    calf = float(row['calf']) if 'calf' in row and pd.notna(
                         row['calf']) else None
-                    neck = float(row['neck']) if 'neck' in row and not pd.isna(
+                    neck = float(row['neck']) if 'neck' in row and pd.notna(
                         row['neck']) else None
 
+                    # Debug the first row's values
+                    if idx == 0:
+                        st.write("First row values after conversion:")
+                        st.write(f"entry_date: {row['entry_date']}")
+                        st.write(f"user_weight: {user_weight}")
+                        st.write(f"height: {height}")
+                        st.write(f"age: {age}")
+                        st.write(f"gender: {gender}")
+                        st.write(f"body_fat: {body_fat}")
+                        st.write(f"chest: {chest}")
+                        st.write(f"waist: {waist}")
+                        st.write(f"hips: {hips}")
+                        st.write(f"arms: {arms}")
+                        st.write(f"glutes: {glutes}")
+                        st.write(f"thigh: {thigh}")
+                        st.write(f"calf: {calf}")
+                        st.write(f"neck: {neck}")
+
+                    # Insert into database
                     cursor.execute("""
                         INSERT INTO body_metrics (
                             entry_date, user_weight, height, age, gender, body_fat, 
@@ -220,7 +207,7 @@ def import_csv_to_body_metrics(csv_file):
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         row['entry_date'],
-                        float(row['user_weight']),
+                        user_weight,
                         height,
                         age,
                         gender,
@@ -494,6 +481,7 @@ def manage_body_metrics():
         it will be automatically calculated.
         """)
 
+        # Option to import from file upload
         uploaded_file = st.file_uploader(
             "Choose a CSV file", type="csv", key="metrics_csv_uploader")
 
@@ -516,6 +504,26 @@ def manage_body_metrics():
                         st.rerun()
                     else:
                         st.error(message)
+
+        # Option to import from a specific file path
+        st.write("### Or Import from File Path")
+        if st.button("Import from body_metrics (1).csv"):
+            try:
+                file_path = "body_metrics (1).csv"
+                if os.path.exists(file_path):
+                    with open(file_path, "rb") as f:
+                        success, message = import_csv_to_body_metrics(f)
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.error(message)
+                else:
+                    st.error(f"File not found: {file_path}")
+            except Exception as e:
+                st.error(f"Error importing from file: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
 
     # Fetch data from the database
     with create_connection() as conn:
