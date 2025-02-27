@@ -364,6 +364,51 @@ def advanced_analytics_tab(df):
     else:
         st.info("Not enough numeric data for correlation analysis.")
 
+    # Add animated visualization of progress over time
+    st.subheader("✨ Animated Progress Visualization")
+    if len(df) > 0 and 'date' in df.columns and 'workout_type' in df.columns:
+        # Prepare data for animation - aggregate by date and workout_type
+        anim_data = df.groupby(['date', 'workout_type']).agg({
+            'volume': 'sum',
+            'weight': 'max'
+        }).reset_index()
+
+        # Create animation of volume by workout type over time
+        fig_anim = px.scatter(
+            anim_data,
+            x='weight',
+            y='volume',
+            size='volume',
+            color='workout_type',
+            animation_frame=pd.to_datetime(
+                anim_data['date']).dt.strftime('%Y-%m-%d'),
+            animation_group='workout_type',
+            range_x=[0, anim_data['weight'].max() * 1.1],
+            range_y=[0, anim_data['volume'].max() * 1.1],
+            title="Workout Progress Animation (Weight vs Volume)",
+            labels={
+                'weight': 'Max Weight (lbs)',
+                'volume': 'Total Volume (lbs)',
+                'workout_type': 'Workout Type'
+            }
+        )
+
+        # Customize animation settings
+        fig_anim.update_layout(
+            height=600,
+            xaxis_title="Max Weight (lbs)",
+            yaxis_title="Total Volume (lbs)"
+        )
+        # Improve play button settings
+        fig_anim.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 800
+        fig_anim.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 500
+
+        st.plotly_chart(fig_anim, use_container_width=True)
+        st.caption(
+            "▶️ Play the animation to see how your workout volume and max weight have changed over time")
+    else:
+        st.info("Not enough data for animated visualization. Make sure your data includes dates and workout types.")
+
     st.subheader("Weight vs. Volume Scatter Plot")
     if "weight" in df.columns and "volume" in df.columns:
         corr_val = df["weight"].corr(df["volume"])
@@ -806,6 +851,62 @@ def dashboard_tab(df):
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    # Add animated performance trends visualization
+    st.subheader("🎬 Performance Trends Animation")
+    if not filtered_df.empty and 'workout' in filtered_df.columns:
+        # Get top 5 most frequent exercises
+        top_exercises = filtered_df['workout'].value_counts().head(
+            5).index.tolist()
+
+        # Filter data for these exercises
+        top_exercise_data = filtered_df[filtered_df['workout'].isin(
+            top_exercises)]
+
+        if not top_exercise_data.empty:
+            # Prepare data for the animation - find max weight by date for each exercise
+            performance_data = top_exercise_data.groupby(['date', 'workout']).agg({
+                'weight': 'max',
+                'reps': 'max',
+                'volume': 'sum'
+            }).reset_index()
+
+            # Create the animated line chart
+            fig_anim = px.line(
+                performance_data,
+                x='date',
+                y='weight',
+                color='workout',
+                animation_frame=pd.to_datetime(
+                    performance_data['date']).dt.strftime('%Y-%m-%d'),
+                range_y=[0, performance_data['weight'].max() * 1.1],
+                title="Exercise Performance Over Time",
+                labels={
+                    'date': 'Date',
+                    'weight': 'Max Weight (lbs)',
+                    'workout': 'Exercise'
+                },
+                markers=True
+            )
+
+            # Customize animation settings
+            fig_anim.update_layout(
+                height=500,
+                xaxis_title="Date",
+                yaxis_title="Max Weight (lbs)"
+            )
+
+            # Improve animation playback settings
+            fig_anim.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 600
+            fig_anim.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 300
+
+            st.plotly_chart(fig_anim, use_container_width=True)
+            st.caption(
+                "▶️ Press play to watch how your strength has progressed for your top exercises over time")
+        else:
+            st.info("Not enough exercise data to create animation.")
+    else:
+        st.info("Not enough data for animation visualization.")
 
     # Create two rows with two columns each
     row1_col1, row1_col2 = st.columns(2)

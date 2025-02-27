@@ -7,6 +7,8 @@ import plotly.graph_objects as go
 import numpy as np
 import datetime
 import time
+import os
+import sqlite3
 
 # Global styling and configuration
 st.set_page_config(
@@ -157,42 +159,95 @@ def show_metric_card(title, value, trend=None, suffix="", precision=1):
         st.metric(title, value_str)
 
 
-def load_workouts_data():
-    """Load workout data from the database."""
-    with create_connection() as conn:
-        df = pd.read_sql_query("SELECT * FROM workouts", conn)
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            df["volume"] = df["weight"] * df["sets"] * df["reps"]
-    return df
+@st.cache_data
+def load_workouts():
+    """Load workouts data from the database."""
+    try:
+        db_path = "workouts.db"
+        last_update = os.path.getmtime(db_path)
+
+        # Check if we need to add the modification counter to the session state
+        if "db_modification_counter" not in st.session_state:
+            st.session_state.db_modification_counter = 0
+
+    except Exception as e:
+        st.error(f"❌ Unable to access the database file: {e}")
+        last_update = None
+
+    @st.cache_data
+    def get_workouts(last_update, modification_counter):
+        try:
+            with create_connection() as conn:
+                df = pd.read_sql_query("SELECT * FROM workouts", conn)
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                df["volume"] = df["weight"] * df["sets"] * df["reps"]
+            return df
+        except sqlite3.OperationalError as e:
+            # Table doesn't exist yet or other SQL error
+            st.warning(
+                "Workout data table not found. It will be created when you add your first workout.")
+            return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Error loading workout data: {e}")
+            return pd.DataFrame()
+
+    if last_update is not None:
+        # Pass both the file modification time and the counter to invalidate cache
+        return get_workouts(last_update, st.session_state.db_modification_counter)
+    else:
+        return pd.DataFrame()
 
 
 def load_body_metrics_data():
     """Load body metrics data from the database."""
-    with create_connection() as conn:
-        df = pd.read_sql_query(
-            "SELECT * FROM body_metrics ORDER BY entry_date", conn)
-        if not df.empty:
-            df["entry_date"] = pd.to_datetime(
-                df["entry_date"], errors="coerce")
-    return df
+    try:
+        with create_connection() as conn:
+            df = pd.read_sql_query(
+                "SELECT * FROM body_metrics ORDER BY entry_date", conn)
+            if not df.empty:
+                df["entry_date"] = pd.to_datetime(
+                    df["entry_date"], errors="coerce")
+        return df
+    except sqlite3.OperationalError as e:
+        # Table doesn't exist yet or other SQL error
+        st.warning(
+            "Body metrics table not found. It will be created when you add your first body metrics entry.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading body metrics data: {e}")
+        return pd.DataFrame()
 
 
 def load_progress_photos_count():
     """Count progress photos by type."""
-    with create_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT photo_type, COUNT(*) FROM progress_photos GROUP BY photo_type")
-        return dict(cursor.fetchall())
+    try:
+        with create_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT photo_type, COUNT(*) FROM progress_photos GROUP BY photo_type")
+            return dict(cursor.fetchall())
+    except sqlite3.OperationalError as e:
+        # Table doesn't exist yet or other SQL error
+        return {}
+    except Exception as e:
+        st.error(f"Error loading progress photos: {e}")
+        return {}
 
 
 def load_goals_data():
     """Load user fitness goals."""
-    with create_connection() as conn:
-        df = pd.read_sql_query(
-            "SELECT * FROM body_metrics_goals WHERE achieved = 0", conn)
-        return df
+    try:
+        with create_connection() as conn:
+            df = pd.read_sql_query(
+                "SELECT * FROM body_metrics_goals WHERE achieved = 0", conn)
+            return df
+    except sqlite3.OperationalError as e:
+        # Table doesn't exist yet or other SQL error
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading goals data: {e}")
+        return pd.DataFrame()
 
 
 def calculate_trend(current, previous):
@@ -233,7 +288,7 @@ def unified_dashboard():
         st.session_state.last_refresh_time = time.time()
 
     # Load all necessary data
-    workouts_df = load_workouts_data()
+    workouts_df = load_workouts()
     body_metrics_df = load_body_metrics_data()
     photo_counts = load_progress_photos_count()
     goals_df = load_goals_data()

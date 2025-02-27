@@ -1,3 +1,4 @@
+from utils import estimate_body_fat
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,6 +12,9 @@ import io
 import base64
 from db_utils import create_connection
 from auth import check_password
+
+# Add parent directory to path to import utils module
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # First check authentication
 if not check_password():
@@ -115,6 +119,9 @@ def import_csv_to_body_metrics(csv_file):
         # Read the CSV file
         df = pd.read_csv(csv_file)
 
+        # Print column names for debugging
+        st.write("CSV columns:", df.columns.tolist())
+
         # Validate required columns
         required_columns = ['entry_date', 'user_weight']
         missing_columns = [
@@ -131,37 +138,108 @@ def import_csv_to_body_metrics(csv_file):
         optional_columns = ['height', 'age', 'gender', 'body_fat', 'chest', 'waist',
                             'hips', 'arms', 'glutes', 'thigh', 'calf', 'neck']
 
+        # Show which columns are missing for debugging
+        missing_optional = [
+            col for col in optional_columns if col not in df.columns]
+        if missing_optional:
+            st.info(f"Adding missing columns: {', '.join(missing_optional)}")
+
         for col in optional_columns:
             if col not in df.columns:
                 df[col] = None
+
+        # Display the DataFrame after adding missing columns
+        st.write("DataFrame with all columns:")
+        st.dataframe(df.head(2))
+
+        # Calculate body fat if not provided but we have enough data to estimate it
+        for idx, row in df.iterrows():
+            if (pd.isna(row['body_fat']) or row['body_fat'] is None) and not pd.isna(row['user_weight']) and not pd.isna(row['height']):
+                # Check if we have enough data to calculate body fat
+                gender = row['gender'] if not pd.isna(row['gender']) else None
+                age = row['age'] if not pd.isna(row['age']) else None
+                neck = row['neck'] if not pd.isna(row['neck']) else None
+                waist = row['waist'] if not pd.isna(row['waist']) else None
+                hips = row['hips'] if not pd.isna(row['hips']) else None
+
+                if gender is not None and age is not None:
+                    # Calculate body fat using the utility function
+                    body_fat = estimate_body_fat(
+                        row['user_weight'], row['height'], age, gender, neck, waist, hips
+                    )
+                    df.at[idx, 'body_fat'] = body_fat
 
         # Insert data into database
         with create_connection() as conn:
             cursor = conn.cursor()
 
             # Insert body metrics data
-            for _, row in df.iterrows():
-                cursor.execute("""
-                    INSERT INTO body_metrics (
-                        entry_date, user_weight, height, age, gender, body_fat, 
-                        chest, waist, hips, arms, glutes, thigh, calf, neck
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    row['entry_date'],
-                    row['user_weight'],
-                    row.get('height'),
-                    row.get('age'),
-                    row.get('gender'),
-                    row.get('body_fat'),
-                    row.get('chest'),
-                    row.get('waist'),
-                    row.get('hips'),
-                    row.get('arms'),
-                    row.get('glutes'),
-                    row.get('thigh'),
-                    row.get('calf'),
-                    row.get('neck')
-                ))
+            success_count = 0
+            error_count = 0
+
+            for idx, row in df.iterrows():
+                try:
+                    # Print row values for debugging
+                    if idx == 0:  # Only print the first row to avoid cluttering the UI
+                        st.write("First row values:")
+                        for col in ['entry_date', 'user_weight', 'height', 'age', 'gender', 'body_fat',
+                                    'chest', 'waist', 'hips', 'arms', 'glutes', 'thigh', 'calf', 'neck']:
+                            st.write(
+                                f"{col}: {row[col] if col in row and not pd.isna(row[col]) else 'N/A'}")
+
+                    # Ensure all values are properly handled
+                    height = float(row['height']) if 'height' in row and not pd.isna(
+                        row['height']) else None
+                    age = int(row['age']) if 'age' in row and not pd.isna(
+                        row['age']) else None
+                    gender = str(row['gender']) if 'gender' in row and not pd.isna(
+                        row['gender']) else None
+                    body_fat = float(row['body_fat']) if 'body_fat' in row and not pd.isna(
+                        row['body_fat']) else None
+                    chest = float(row['chest']) if 'chest' in row and not pd.isna(
+                        row['chest']) else None
+                    waist = float(row['waist']) if 'waist' in row and not pd.isna(
+                        row['waist']) else None
+                    hips = float(row['hips']) if 'hips' in row and not pd.isna(
+                        row['hips']) else None
+                    arms = float(row['arms']) if 'arms' in row and not pd.isna(
+                        row['arms']) else None
+                    glutes = float(row['glutes']) if 'glutes' in row and not pd.isna(
+                        row['glutes']) else None
+                    thigh = float(row['thigh']) if 'thigh' in row and not pd.isna(
+                        row['thigh']) else None
+                    calf = float(row['calf']) if 'calf' in row and not pd.isna(
+                        row['calf']) else None
+                    neck = float(row['neck']) if 'neck' in row and not pd.isna(
+                        row['neck']) else None
+
+                    cursor.execute("""
+                        INSERT INTO body_metrics (
+                            entry_date, user_weight, height, age, gender, body_fat, 
+                            chest, waist, hips, arms, glutes, thigh, calf, neck
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        row['entry_date'],
+                        float(row['user_weight']),
+                        height,
+                        age,
+                        gender,
+                        body_fat,
+                        chest,
+                        waist,
+                        hips,
+                        arms,
+                        glutes,
+                        thigh,
+                        calf,
+                        neck
+                    ))
+                    success_count += 1
+                except Exception as e:
+                    error_count += 1
+                    st.error(
+                        f"Error inserting row {idx+1} with date {row['entry_date']}: {e}")
+                    st.write(f"Row data: {row.to_dict()}")
 
             conn.commit()
 
@@ -171,9 +249,15 @@ def import_csv_to_body_metrics(csv_file):
             else:
                 st.session_state.db_modification_counter = 1
 
-        return True, f"Successfully imported {len(df)} body metrics records."
+            if error_count > 0:
+                st.warning(f"{error_count} rows had errors during import.")
+
+        return True, f"Successfully imported {success_count} body metrics records."
 
     except Exception as e:
+        st.error(f"Error details: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         return False, f"Error importing data: {str(e)}"
 
 
@@ -405,6 +489,9 @@ def manage_body_metrics():
         - gender
         - body_fat (percentage)
         - chest, waist, hips, arms, glutes, thigh, calf, neck (all in inches)
+        
+        Note: If body_fat is not provided but height, age, and gender are available, 
+        it will be automatically calculated.
         """)
 
         uploaded_file = st.file_uploader(
@@ -454,6 +541,73 @@ def manage_body_metrics():
                 "entry_date": st.column_config.DateColumn(
                     "Date",
                     help="Entry date",
+                ),
+                "user_weight": st.column_config.NumberColumn(
+                    "Weight (lbs)",
+                    help="Body weight in pounds",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "height": st.column_config.NumberColumn(
+                    "Height (in)",
+                    help="Height in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "body_fat": st.column_config.NumberColumn(
+                    "Body Fat %",
+                    help="Body fat percentage",
+                    min_value=0,
+                    max_value=100,
+                    format="%.1f"
+                ),
+                "chest": st.column_config.NumberColumn(
+                    "Chest (in)",
+                    help="Chest measurement in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "waist": st.column_config.NumberColumn(
+                    "Waist (in)",
+                    help="Waist measurement in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "hips": st.column_config.NumberColumn(
+                    "Hips (in)",
+                    help="Hips measurement in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "arms": st.column_config.NumberColumn(
+                    "Arms (in)",
+                    help="Arms measurement in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "glutes": st.column_config.NumberColumn(
+                    "Glutes (in)",
+                    help="Glutes measurement in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "thigh": st.column_config.NumberColumn(
+                    "Thigh (in)",
+                    help="Thigh measurement in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "calf": st.column_config.NumberColumn(
+                    "Calf (in)",
+                    help="Calf measurement in inches",
+                    min_value=0,
+                    format="%.1f"
+                ),
+                "neck": st.column_config.NumberColumn(
+                    "Neck (in)",
+                    help="Neck measurement in inches",
+                    min_value=0,
+                    format="%.1f"
                 ),
             },
             disabled=["id"],
@@ -570,8 +724,8 @@ def manage_body_metrics():
         st.write("---")
         st.subheader("Export Data")
 
-        # Export as CSV
-        csv_data = edited_df.to_csv(index=False).encode('utf-8')
+        # Export as CSV - use the original df instead of edited_df to ensure all data is exported
+        csv_data = df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download as CSV",
             data=csv_data,
