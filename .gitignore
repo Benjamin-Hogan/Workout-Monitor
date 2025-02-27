@@ -1,0 +1,34 @@
+# Database files
+*.db
+workouts.db
+user_data/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Icon files (optional, but they're large binary files)
+# Uncomment if you want to exclude them
+# *.icns
+# icons/
+
+# Streamlit
+.streamlit/
+
+# Logs
+*.log 

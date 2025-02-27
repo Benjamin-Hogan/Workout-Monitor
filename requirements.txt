@@ -1,0 +1,10 @@
+streamlit
+pandas
+openpyxl
+plotly
+scikit-learn
+prophet
+numpy
+scipy
+statsmodels
+pyinstaller 
